@@ -1,0 +1,126 @@
+* Summary
+=sfork= is a prototype for a new system call on Linux which provides a synchronous, single-threaded interface for starting processes.
+
+=sfork= can be viewed as a variation on =vfork= which does the minimal amount of work required to make vfork actually useful and usable.
+In particular, =sfork= removes all the traditional restrictions =vfork= has on what you can do in the child process.
+* Interface
+The raw interface is identical to the usual prototypes on Linux for =vfork=, =exit=, and =execveat=:
+
+#+BEGIN_SRC c
+int sfork();
+int sfork_exit(int status);
+int sfork_execveat(int dirfd, const char* pathname, char *const argv[],
+                   char *const envp[], int flags);
+#+END_SRC
+
+However, unlike traditional =fork= and =vfork=, =sfork= only ever returns *once*.
+=sfork= always returns 0 on success,
+or a negative value if forking failed for any of the usual reasons,
+like a cap on the number of processes.
+
+The pid, then, is obtained from the return value of =exit= or =execveat=.
+Of course, those system calls don't usually return, hence the need to wrap them with =sfork=-supporting equivalents.
+
+In other words, the control flow for =sfork= is different from the control flow for =fork= and =vfork=.
+
+Control flow for =fork= and =vfork= proceeds as below.
+Each line is numbered according to the order in which it is reached.
+(Error checking is omitted for simplicity)
+
+#+BEGIN_SRC c
+  int ret; // 1
+  printf("I'm in the parent"); // 2
+  ret = vfork();  // 3 and 7
+  if (ret == 0) { // 4 and 8
+    printf("I'm in the child"); // 5
+    exec(); // 6
+  } else {
+    printf("I'm in the parent once again"); // 9
+    printf("Pid of child is %d", ret); // 10
+  }
+#+END_SRC
+
+Control flow for =sfork= proceeds like this (again, with error checking omitted):
+#+BEGIN_SRC c
+  int ret; // 1
+  printf("I'm in the parent"); // 2
+  sfork();  // 3
+  printf("I'm in the child"); // 4
+  ret = exec(); // 5
+  printf("I'm in the parent once again"); // 6
+  printf("Pid of child is %d", ret); // 7
+#+END_SRC
+
+Control flow works like that naturally in any language that calls =sfork=,
+like any other normal function call.
+
+For example, with the Python wrapper, exceptions thrown in the child automatically propagate up.
+The subprocess() contextmanager in the Python wrapper catches exceptions,
+automatically calls exit(1) to exit the child process context and re-enter the parent process context,
+and rethrows the exception.
+So if a user application encounters an error while setting up the child,
+the error is naturally and easily propagated up.
+
+A clean way to understand sfork,
+is to view it as moving a single existing thread of control from an existing process context, the parent,
+to a new, fresh process context, the child, which starts off sharing its address space with the parent.
+
+In this view, after a call to =sfork=, =exec= is an overloaded operation which does three things:
+Creates a new address space inside the current process context and loads the executable into it,
+creates a new thread starting at the executable entry point in the current process context and the new address space,
+and returns the current thread to the parent process context.
+
+And =exit=, after a call to =sfork=, just destroys the current process context (setting the exit code),
+and returns the current thread to the parent process context.
+
+In this view, =sfork= actually is much more like =unshare= than =fork= or =vfork=.
+Like =unshare=, =sfork= creates a new execution context and moves the current thread into that execution context.
+Unfortunately, =sfork= cannot currently be implemented with =unshare=;
+see the discussion in appropriate section below.
+* Userspace implementation
+Recall that =vfork= shares the memory space between the parent process and child process,
+and blocks the thread in the parent process that executes =vfork=.
+The thread in the parent process is unblocked when the child process calls either =exec= or =exit=.
+
+The kernel, when implementing =vfork=, saves the parent process's registers and restores them after the parent is resumed.
+To achieve the behavior of =sfork=, we would rather the kernel just not save and restore the registers at all,
+but rather, just continue control flow from the point of the child process's exec.
+
+If you view =vfork= as just moving a single thread of control between processes,
+then the fact that the kernel saves the registers of this thread at the point of calling =vfork=,
+and then restores them when calling =exec= or =exit=,
+becomes obviously unnecessary:
+Merely not doing that save and restore gives us =sfork=.
+Without that save and restore, we get a single continuous control flow without any jumps.
+
+So all that the =sfork= wrapper does is perform the exact opposite jump of the kernel:
+It saves the child process's registers at the point of =exec= or =exit=,
+and restore those child registers immediately after the parent process is resumed with the parent's saved registers.
+This register save/restore exactly counteracts the kernel's register save/restore.
+* Possible implementation using =unshare=
+Instead of calling =vfork= to create a new process context,
+=sfork= could call =unshare(CLONE_SIGHAND|CLONE_FILES|CLONE_FS)= to create a new process context and move the current thread into it.
+
+Then, instead of calling =exec=, we would call =clone(new_stack, CLONE_VM)= while inside the new process context,
+with an appropriately set up =new_stack= to immediately call =exec=.
+
+Then to return to the parent process context, 
+we would call =setns(procfd, CLONE_SIGHAND|CLONE_FILES|CLONE_FS)=,
+where =procfd= is a file descriptor pointing to the parent process context.
+
+The main missing piece here is that there's no way to get a file descriptor representing the parent process context,
+and =setns= does not support passing any of =CLONE_SIGHAND|CLONE_FILES|CLONE_FS=,
+so there's no way for the thread to return to the parent process.
+
+Also, =unshare= doesn't allow calling =CLONE_SIGHAND= in multi-threaded applications,
+for good reason.
+Properly dealing with signals will be tricky.
+
+Also, =unshare= doesn't allow calling =CLONE_VM= in multi-threaded applications,
+for reasons which are unclear to me.
+I think that could be changed to be allowed.
+
+Also, calling =clone(new_stack, CLONE_VM)= will copy the address space,
+negating one of the main advantages of a =vfork= style approach.
+We may need some other specialized system call that runs an executable in a new address space on a new thread,
+inheriting all the parts of the execution context.
