@@ -10,12 +10,6 @@ def throw_on_error(ret) -> int:
     else:
         return ret
 
-def sfork() -> None:
-    throw_on_error(lib.sfork())
-
-def sfork_exit(status: int) -> int:
-    return throw_on_error(lib.sfork_exit(status))
-
 def _to_null_terminated_string_array(args: t.List[bytes]) -> t.Any:
     """Both the strings in the array, and the array itself, are null terminated."""
     return ffi.new('char *const[]', [ffi.new('char[]', arg) for arg in args] + [ffi.NULL])
@@ -32,7 +26,13 @@ def serialize_environ(**kwargs) -> t.List[bytes]:
         ret.append(b''.join([to_bytes(key), b'=', to_bytes(value)]))
     return ret
 
-def sfork_execveat(pathname: bytes, argv: t.List[bytes], envp: t.List[bytes], flags: int, *, dirfd: t.Optional[int]=None) -> int:
+def sfork() -> None:
+    throw_on_error(lib.sfork())
+
+def exit(status: int) -> int:
+    return throw_on_error(lib.sfork_exit(status))
+
+def execveat(pathname: bytes, argv: t.List[bytes], envp: t.List[bytes], flags: int, *, dirfd: t.Optional[int]=None) -> int:
     # this null-terminated-array logic is tricky to extract out into a separate function due to lifetime issues
     null_terminated_args = [ffi.new('char[]', arg) for arg in argv]
     argv = ffi.new('char *const[]', null_terminated_args + [ffi.NULL])
@@ -42,9 +42,9 @@ def sfork_execveat(pathname: bytes, argv: t.List[bytes], envp: t.List[bytes], fl
         dirfd = lib.AT_FDCWD
     return throw_on_error(lib.sfork_execveat(dirfd, ffi.new('char[]', pathname), argv, envp, flags))
 
-# most of these args are quite unsafe to call from Python directly :)
-def sfork_clone(flags: int, child_stack: int=0, ptid: int=0, ctid: int=0, newtls: int=0) -> int:
-    return throw_on_error(lib.sfork_clone(flags, child_stack, ptid, ctid, newtls))
+def clone(flags: int) -> int:
+    # most of these args are quite unsafe to call from Python directly :)
+    return throw_on_error(lib.sfork_clone(flags, ffi.NULL, ffi.NULL, ffi.NULL, 0))
 
 class ProcessContext:
     """A Linux process, as a context for threads to run inside."""
@@ -69,7 +69,7 @@ class SubprocessContext:
 
     def exit(self, status: int) -> None:
         self._can_syscall()
-        self.pid = sfork_exit(status)
+        self.pid = exit(status)
         global current_process
         current_process = self.parent_process
 
@@ -78,8 +78,8 @@ class SubprocessContext:
         self._can_syscall()
         if envp is None:
             envp = os.environ
-        self.pid = sfork_execveat(to_bytes(os.fspath(pathname)), [to_bytes(arg) for arg in argv],
-                                  serialize_environ(**envp), flags=0)
+        self.pid = execveat(to_bytes(os.fspath(pathname)), [to_bytes(arg) for arg in argv],
+                            serialize_environ(**envp), flags=0)
         global current_process
         current_process = self.parent_process
 
