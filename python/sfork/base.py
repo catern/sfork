@@ -3,6 +3,8 @@ from sfork._raw import lib, ffi
 import os
 import typing as t
 
+AT_FDCWD = lib.AT_FDCWD
+
 def throw_on_error(ret) -> int:
     if ret < 0:
         err = -ret
@@ -32,14 +34,12 @@ def sfork() -> None:
 def exit(status: int) -> int:
     return throw_on_error(lib.sfork_exit(status))
 
-def execveat(pathname: bytes, argv: t.List[bytes], envp: t.List[bytes], flags: int, *, dirfd: t.Optional[int]=None) -> int:
+def execveat(dirfd: int, pathname: bytes, argv: t.List[bytes], envp: t.List[bytes], flags: int) -> int:
     # this null-terminated-array logic is tricky to extract out into a separate function due to lifetime issues
     null_terminated_args = [ffi.new('char[]', arg) for arg in argv]
     argv = ffi.new('char *const[]', null_terminated_args + [ffi.NULL])
     null_terminated_env_vars = [ffi.new('char[]', arg) for arg in envp]
     envp = ffi.new('char *const[]', null_terminated_env_vars + [ffi.NULL])
-    if dirfd is None:
-        dirfd = lib.AT_FDCWD
     return throw_on_error(lib.sfork_execveat(dirfd, ffi.new('char[]', pathname), argv, envp, flags))
 
 def clone(flags: int) -> int:
@@ -78,7 +78,7 @@ class SubprocessContext:
         self._can_syscall()
         if envp is None:
             envp = os.environ
-        self.pid = execveat(to_bytes(os.fspath(pathname)), [to_bytes(arg) for arg in argv],
+        self.pid = execveat(AT_FDCWD, to_bytes(os.fspath(pathname)), [to_bytes(arg) for arg in argv],
                             serialize_environ(**envp), flags=0)
         global current_process
         current_process = self.parent_process
