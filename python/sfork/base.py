@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-from sfork._raw import lib, ffi
+from sfork._raw import lib, ffi # type: ignore
 import os
 import typing as t
 
@@ -77,9 +77,12 @@ class SubprocessContext:
              *, envp: t.Optional[t.Dict[str, str]]=None) -> None:
         self._can_syscall()
         if envp is None:
-            envp = os.environ
-        self.pid = execveat(AT_FDCWD, to_bytes(os.fspath(pathname)), [to_bytes(arg) for arg in argv],
-                            serialize_environ(**envp), flags=0)
+            environ = serialize_environ(**os.environ)
+        else:
+            environ = serialize_environ(**envp)
+        self.pid = execveat(AT_FDCWD,
+                            to_bytes(os.fspath(pathname)), [to_bytes(arg) for arg in argv],
+                            environ, flags=0)
         global current_process
         current_process = self.parent_process
 
